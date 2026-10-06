@@ -1,6 +1,7 @@
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
+from django.core.exceptions import ImproperlyConfigured
 from django.test import TestCase
 
 from utilities.rqworker import (
@@ -108,6 +109,39 @@ class NetBoxRQWorkerHeartbeatTestCase(TestCase):
             NetBoxRQWorker.heartbeat(worker)
         worker.register_birth.assert_not_called()
         super_heartbeat.assert_called_once()
+
+
+class NetBoxRQWorkerBootstrapTestCase(TestCase):
+    """
+    The overridden bootstrap() must load the URLconf before invoking
+    super().bootstrap(), so that forked work horses inherit it.
+    """
+
+    def _make_resolver(self, side_effect=None):
+        resolver = MagicMock()
+        url_patterns = PropertyMock(side_effect=side_effect)
+        type(resolver).url_patterns = url_patterns
+        return resolver, url_patterns
+
+    def test_bootstrap_loads_urlconf_before_super(self):
+        worker = NetBoxRQWorker.__new__(NetBoxRQWorker)
+        resolver, url_patterns = self._make_resolver()
+        loaded_before_super = []
+        with patch('utilities.rqworker.get_resolver', return_value=resolver), \
+                patch('rq.Worker.bootstrap') as super_bootstrap:
+            super_bootstrap.side_effect = lambda *args, **kwargs: loaded_before_super.append(url_patterns.called)
+            NetBoxRQWorker.bootstrap(worker, 'DEBUG', date_format='%H')
+        self.assertEqual(loaded_before_super, [True])
+        super_bootstrap.assert_called_once_with('DEBUG', date_format='%H')
+
+    def test_bootstrap_urlconf_error_aborts_before_registration(self):
+        worker = NetBoxRQWorker.__new__(NetBoxRQWorker)
+        resolver, _ = self._make_resolver(side_effect=ImproperlyConfigured('broken schema'))
+        with patch('utilities.rqworker.get_resolver', return_value=resolver), \
+                patch('rq.Worker.bootstrap') as super_bootstrap:
+            with self.assertRaises(ImproperlyConfigured):
+                NetBoxRQWorker.bootstrap(worker)
+        super_bootstrap.assert_not_called()
 
 
 class GetWorkersForQueueTestCase(TestCase):
